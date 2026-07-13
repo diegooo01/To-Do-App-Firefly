@@ -16,8 +16,17 @@ composer install
 cp .env.example .env
 php artisan key:generate
 php artisan jwt:secret
-php artisan migrate
+php artisan migrate --seed
 ```
+
+El seeder crea dos usuarios de prueba:
+
+| Email | Contraseña | Tareas |
+|---|---|---|
+| `diego@test.com` | `password123` | 8 tareas en distintos estados y prioridades |
+| `otro@test.com` | `password123` | 5 tareas generadas aleatoriamente |
+
+El segundo usuario existe para verificar el aislamiento de datos: al iniciar sesión como `diego@test.com` solo deben visualizarse sus 8 tareas.
 
 La base de datos SQLite se crea automáticamente al migrar.
 
