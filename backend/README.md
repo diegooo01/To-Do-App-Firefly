@@ -115,6 +115,109 @@ GET /api/tasks?status=pending&priority=high
 | 403 | La tarea pertenece a otro usuario |
 | 422 | Validación fallida o regla de negocio incumplida |
 
+## Pruebas manuales del API
+
+Con el servidor en ejecución y la base de datos poblada. En Windows debe usarse `curl.exe`, no `curl` (en PowerShell es un alias de `Invoke-WebRequest`, con otra sintaxis).
+
+La cabecera `Accept: application/json` no es opcional: sin ella, ante un fallo de autenticación Laravel intenta redirigir a una ruta `login` inexistente en un API en lugar de devolver un 401.
+
+### Autenticación
+
+```bash
+# Login — la respuesta incluye el token
+curl.exe -X POST http://localhost:8000/api/login -H "Accept: application/json" -d "email=diego@test.com" -d "password=password123"
+```
+
+Guardar el token para no repetirlo:
+
+```powershell
+$t = "PEGAR_AQUI_EL_TOKEN"
+```
+
+```bash
+# Usuario autenticado
+curl.exe http://localhost:8000/api/me -H "Accept: application/json" -H "Authorization: Bearer $t"
+
+# Sin token: 401
+curl.exe -i http://localhost:8000/api/me -H "Accept: application/json"
+```
+
+### CRUD y filtros
+
+```bash
+# Listar
+curl.exe "http://localhost:8000/api/tasks" -H "Accept: application/json" -H "Authorization: Bearer $t"
+
+# Filtrar (individual y combinado)
+curl.exe "http://localhost:8000/api/tasks?status=pending" -H "Accept: application/json" -H "Authorization: Bearer $t"
+curl.exe "http://localhost:8000/api/tasks?priority=high" -H "Accept: application/json" -H "Authorization: Bearer $t"
+curl.exe "http://localhost:8000/api/tasks?search=README" -H "Accept: application/json" -H "Authorization: Bearer $t"
+curl.exe "http://localhost:8000/api/tasks?status=pending&priority=high" -H "Accept: application/json" -H "Authorization: Bearer $t"
+
+# Crear (201)
+curl.exe -X POST http://localhost:8000/api/tasks -H "Accept: application/json" -H "Authorization: Bearer $t" -d "title=Tarea de prueba" -d "priority=high" -d "due_date=2026-08-01"
+
+# Editar
+curl.exe -X PUT "http://localhost:8000/api/tasks/5" -H "Accept: application/json" -H "Authorization: Bearer $t" -d "title=Titulo actualizado"
+
+# Cambiar estado
+curl.exe -X PATCH "http://localhost:8000/api/tasks/5/status" -H "Accept: application/json" -H "Authorization: Bearer $t" -d "status=done"
+
+# Eliminar (204, sin cuerpo)
+curl.exe -i -X DELETE "http://localhost:8000/api/tasks/5" -H "Accept: application/json" -H "Authorization: Bearer $t"
+
+# Dashboard
+curl.exe "http://localhost:8000/api/dashboard" -H "Accept: application/json" -H "Authorization: Bearer $t"
+```
+
+El dashboard de `diego@test.com` devuelve `{"total":8,"pending":4,"in_progress":2,"done":2}`.
+
+### Verificar la regla de negocio
+
+Marcar una tarea como completada e intentar editarla:
+
+```bash
+curl.exe -X PATCH "http://localhost:8000/api/tasks/3/status" -H "Accept: application/json" -H "Authorization: Bearer $t" -d "status=done"
+
+curl.exe -i -X PUT "http://localhost:8000/api/tasks/3" -H "Accept: application/json" -H "Authorization: Bearer $t" -d "title=Nuevo titulo"
+```
+
+La segunda llamada responde **422** con el mensaje "Una tarea completada no puede ser editada." Cambiar su estado sigue permitido, de modo que la tarea puede reabrirse.
+
+### Verificar el aislamiento entre usuarios
+
+Iniciar sesión con el segundo usuario y guardar su token en `$t2`:
+
+```bash
+curl.exe -X POST http://localhost:8000/api/login -H "Accept: application/json" -d "email=otro@test.com" -d "password=password123"
+```
+
+```bash
+# Su listado no contiene ninguna tarea de diego@test.com
+curl.exe "http://localhost:8000/api/tasks" -H "Accept: application/json" -H "Authorization: Bearer $t2"
+
+# Acceder a una tarea ajena por ID: 403
+curl.exe -i "http://localhost:8000/api/tasks/1" -H "Accept: application/json" -H "Authorization: Bearer $t2"
+
+# Editarla o eliminarla: 403
+curl.exe -i -X PUT "http://localhost:8000/api/tasks/1" -H "Accept: application/json" -H "Authorization: Bearer $t2" -d "title=Modificada"
+curl.exe -i -X DELETE "http://localhost:8000/api/tasks/1" -H "Accept: application/json" -H "Authorization: Bearer $t2"
+```
+
+Son dos mecanismos protegiendo dos vectores distintos: el listado nunca incluye tareas ajenas porque la consulta parte de la relación del usuario; el acceso directo por identificador lo bloquea `TaskPolicy`.
+
+### Verificar el cierre de sesión
+
+```bash
+curl.exe -X POST http://localhost:8000/api/logout -H "Accept: application/json" -H "Authorization: Bearer $t"
+
+curl.exe -i http://localhost:8000/api/me -H "Accept: application/json" -H "Authorization: Bearer $t"
+```
+
+La segunda llamada responde **401**. El token no ha expirado ni ha dejado de ser criptográficamente válido: está en la *blacklist*, que el middleware consulta en cada petición.
+
+> Los ejemplos envían los datos como `form-data`, que Laravel interpreta sin problema. Enviar JSON desde PowerShell exige escapar comillas y resulta propenso a errores; el API acepta ambos formatos y un cliente real (Axios, Postman) envía JSON sin dificultad.
+
 ## Estructura relevante
 
 ```
