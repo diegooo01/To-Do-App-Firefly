@@ -1,12 +1,25 @@
 # Backend — API de Gestión de Tareas
 
-API REST en Laravel 12 con autenticación JWT (`tymon/jwt-auth`).
+API REST en Laravel 12 con autenticación JWT (`tymon/jwt-auth`) y base de datos SQLite.
 
 ## Requisitos
 
-- PHP 8.2+
+- PHP 8.2 o superior
 - Composer 2.x
-- Extensiones PHP: `pdo_sqlite`, `mbstring`, `openssl`, `zip`, `curl`
+- Extensiones de PHP: `sodium`, `zip`, `pdo_sqlite`, `sqlite3`, `mbstring`, `openssl`, `curl`, `fileinfo`
+
+Verificar las extensiones activas:
+
+```bash
+php -m
+```
+
+Si alguna falta, habilitarla en el `php.ini` (localizable con `php --ini`) quitando el `;` de la línea `extension=...` correspondiente, y reiniciar la terminal.
+
+Dos de ellas merecen mención explícita:
+
+- **`sodium`** es obligatoria. `lcobucci/jwt`, dependencia de `tymon/jwt-auth`, la requiere para las operaciones criptográficas. Sin ella, `composer install` falla antes de instalar nada.
+- **`zip`** evita que Composer clone cada dependencia con Git en lugar de descargar los paquetes comprimidos. Sin ella la instalación puede superar los veinte minutos y agotar el timeout.
 
 ## Instalación
 
@@ -19,25 +32,27 @@ php artisan jwt:secret
 php artisan migrate --seed
 ```
 
-El seeder crea dos usuarios de prueba:
+La base de datos SQLite se crea automáticamente al migrar.
+
+### Usuarios de prueba
+
+El seeder crea dos usuarios:
 
 | Email | Contraseña | Tareas |
 |---|---|---|
-| `diego@test.com` | `password123` | 8 tareas en distintos estados y prioridades |
+| `diego@test.com` | `password123` | 8 tareas cubriendo los tres estados y las tres prioridades |
 | `otro@test.com` | `password123` | 5 tareas generadas aleatoriamente |
 
-El segundo usuario existe para verificar el aislamiento de datos: al iniciar sesión como `diego@test.com` solo deben visualizarse sus 8 tareas.
-
-La base de datos SQLite se crea automáticamente al migrar.
+El segundo usuario existe para verificar el aislamiento de datos: al iniciar sesión como `diego@test.com` deben visualizarse únicamente sus 8 tareas.
 
 ## Variables de entorno
 
-| Variable | Descripción |
-|---|---|
-| `APP_KEY` | Clave de la aplicación. La genera `key:generate` |
-| `JWT_SECRET` | Clave de firma de los tokens. La genera `jwt:secret` |
-| `DB_CONNECTION` | Motor de base de datos (`sqlite`) |
-| `FRONTEND_URL` | Origen permitido por CORS (`http://localhost:8001`) |
+| Variable | Descripción | Valor |
+|---|---|---|
+| `APP_KEY` | Clave de la aplicación. La genera `php artisan key:generate` | *(autogenerada)* |
+| `JWT_SECRET` | Clave con la que se firman los tokens. La genera `php artisan jwt:secret` | *(autogenerada)* |
+| `DB_CONNECTION` | Motor de base de datos | `sqlite` |
+| `FRONTEND_URL` | Origen permitido por CORS | `http://localhost:8001` |
 
 ## Ejecución
 
@@ -100,6 +115,27 @@ GET /api/tasks?status=pending&priority=high
 | 403 | La tarea pertenece a otro usuario |
 | 422 | Validación fallida o regla de negocio incumplida |
 
+## Estructura relevante
+
+```
+app/
+├── Enums/
+│   ├── TaskStatus.php          Valores válidos de estado
+│   └── TaskPriority.php        Valores válidos de prioridad
+├── Http/
+│   ├── Controllers/Api/
+│   │   ├── AuthController.php
+│   │   └── TaskController.php
+│   └── Requests/
+│       ├── Auth/               Validación de registro y login
+│       └── Task/               Validación, autorización y regla de negocio
+├── Models/
+│   ├── Task.php                Casts a enum y query scopes de filtrado
+│   └── User.php                Implementa JWTSubject
+└── Policies/
+    └── TaskPolicy.php          Verificación de propiedad
+```
+
 ## Decisiones Técnicas
 
 ### 1. La regla "una tarea completada no puede editarse" vive en el Form Request
@@ -112,9 +148,9 @@ Como consecuencia intencional, `PATCH /tasks/{id}/status` **no** aplica esta res
 
 ### 2. El aislamiento por usuario se resuelve en dos capas
 
-Son dos vectores distintos y cada uno se atiende de forma diferente:
+Son dos vectores de ataque distintos y cada uno se atiende de forma diferente:
 
-- **Listado y creación:** las consultas parten siempre de `$request->user()->tasks()`, nunca de `Task::query()`, lo que garantiza el `WHERE user_id = ?` a nivel de SQL. Además, `user_id` **no** figura en el `$fillable` del modelo, por lo que un cliente no puede inyectarlo en el cuerpo de la petición para crear tareas a nombre de otro usuario (mass assignment).
+- **Listado y creación:** las consultas parten siempre de `$request->user()->tasks()`, nunca de `Task::query()`, lo que garantiza el `WHERE user_id = ?` a nivel de SQL. Además, `user_id` **no** figura en el `$fillable` del modelo, por lo que un cliente no puede inyectarlo en el cuerpo de la petición para crear tareas a nombre de otro usuario (protección frente a mass assignment).
 - **Acceso por identificador** (`show`, `update`, `destroy`): el ID llega desde la URL, por lo que se aplica `TaskPolicy`, que verifica la propiedad del recurso y devuelve 403 si no coincide.
 
 Repetir `where('user_id', auth()->id())` en cada método del controlador también funcionaría, pero es frágil: basta omitirlo una vez para abrir una fuga de datos entre usuarios.
@@ -140,8 +176,25 @@ La implementación directa sería un `count()` por métrica: cuatro viajes a la 
 
 ### 5. `status` y `priority` como enums de PHP, no como `ENUM` de base de datos
 
-Los valores válidos residen en `App\Enums\TaskStatus` y `App\Enums\TaskPriority`; la columna en base de datos es un `string`. SQLite no soporta `ENUM` nativo y en MySQL modificarlo exige un `ALTER TABLE`. Además, el mismo enum se emplea a la vez en el cast del modelo (`$task->status` devuelve un objeto tipado) y en la validación (`Rule::enum(...)`), por lo que la lista de valores admitidos existe en un solo lugar: añadir un estado nuevo es una única línea.
+Los valores válidos residen en `App\Enums\TaskStatus` y `App\Enums\TaskPriority`; la columna en base de datos es un `string`. SQLite no soporta `ENUM` nativo y en MySQL modificarlo exige un `ALTER TABLE`.
+
+Además, el mismo enum se emplea a la vez en el cast del modelo (`$task->status` devuelve un objeto tipado), en la validación (`Rule::enum(...)`) y en el factory (`randomElement(TaskStatus::cases())`), por lo que la lista de valores admitidos existe en un solo lugar: añadir un estado nuevo es una única línea.
 
 ### 6. SQLite como motor de base de datos
 
 Permite clonar y ejecutar el proyecto sin levantar ningún servicio externo. El código no depende de particularidades de SQLite: basta cambiar `DB_CONNECTION` en el `.env` para migrar a MySQL o PostgreSQL.
+
+### 7. CORS admite tanto `localhost` como `127.0.0.1`
+
+Ambos apuntan a la misma máquina, pero el navegador los trata como orígenes distintos: la comparación del header `Origin` es una coincidencia exacta de cadena. Como no puede preverse por cuál de las dos URLs accederá quien ejecute el proyecto, se permiten ambas explícitamente en `config/cors.php`.
+
+`supports_credentials` se mantiene en `false` porque la autenticación viaja en la cabecera `Authorization`, no en cookies.
+
+### 8. Se eliminó Laravel Sanctum
+
+`php artisan install:api` instala Sanctum por defecto. Al usar JWT como mecanismo de autenticación, se desinstaló el paquete para no mantener dos sistemas de autenticación coexistiendo en el proyecto.
+
+## Notas
+
+- El cierre de sesión con JWT se implementa mediante una *blacklist*: el token no puede invalidarse criptográficamente antes de su expiración, por lo que su identificador (`jti`) se almacena y el middleware lo rechaza en peticiones posteriores. Es un compromiso consciente entre el carácter *stateless* de JWT y la capacidad de revocar sesiones.
+- En desarrollo, `APP_DEBUG=true` incluye la traza completa en las respuestas de error. En producción debe establecerse en `false`.
